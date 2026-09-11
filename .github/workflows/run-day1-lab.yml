@@ -1,0 +1,121 @@
+name: Run Day 1 YOLO11 Lab
+
+on:
+  push:
+    paths:
+      - '.github/workflows/run-day1-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install notebook runner
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install jupyter nbconvert nbformat ipykernel
+
+      - name: Prepare notebook for non-Colab execution
+        run: |
+          python - <<'PY'
+          import nbformat
+          from pathlib import Path
+
+          src = Path('notebooks/day1_understand_labels.ipynb')
+          dst = Path('notebooks/day1_understand_labels_ci.ipynb')
+          nb = nbformat.read(src, as_version=4)
+
+          kept = []
+          skipped = []
+          for cell in nb.cells:
+              source = cell.get('source', '')
+              if cell.get('cell_type') == 'code' and (
+                  'from google.colab import drive' in source
+                  or 'drive.mount(' in source
+              ):
+                  skipped.append(cell.get('id', '<no-id>'))
+                  continue
+              kept.append(cell)
+
+          nb.cells = kept
+          nbformat.write(nb, dst)
+          print(f'Prepared {dst}; skipped Colab Drive cells: {skipped}')
+          PY
+
+      - name: Execute notebook on CPU
+        env:
+          MPLBACKEND: Agg
+        run: |
+          jupyter nbconvert \
+            --to notebook \
+            --execute notebooks/day1_understand_labels_ci.ipynb \
+            --output day1_understand_labels_executed.ipynb \
+            --ExecutePreprocessor.timeout=1200 \
+            --ExecutePreprocessor.kernel_name=python3
+
+      - name: Verify required outputs
+        run: |
+          test -f REPORT.md
+          test -f day1_lab_outputs/classification_predictions.json
+          test -f day1_lab_outputs/detection_predictions.json
+          test -f day1_lab_outputs/segmentation_predictions.json
+          test -f day1_lab_outputs/IMAGE_ATTRIBUTION.md
+          test -f day1_lab_outputs/visuals/classification_top5.png
+          test -f day1_lab_outputs/visuals/detection_predictions.png
+          test -f day1_lab_outputs/visuals/segmentation_prediction.png
+          echo 'PASS: all required Day 1 evidence files exist.'
+
+      - name: Stage official report structure
+        run: |
+          rm -rf report/day1_lab_outputs
+          mkdir -p report
+          cp REPORT.md report/REPORT.md
+          cp -a day1_lab_outputs report/day1_lab_outputs
+
+      - name: Build K4 submission ZIP
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          root = Path('report')
+          zip_path = Path('K4-DAY01-report.zip')
+          with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+              zf.write(root / 'REPORT.md', 'REPORT.md')
+              for path in sorted((root / 'day1_lab_outputs').rglob('*')):
+                  if path.is_file():
+                      zf.write(path, path.relative_to(root).as_posix())
+          print(zip_path)
+          PY
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: K4-DAY01-report
+          path: K4-DAY01-report.zip
+          if-no-files-found: error
+
+      - name: Commit generated evidence to report folder
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add report/REPORT.md report/day1_lab_outputs
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+          else
+            git commit -m 'Generate Day 1 YOLO11 lab evidence [skip ci]'
+            git push
+          fi
