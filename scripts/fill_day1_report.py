@@ -1,0 +1,118 @@
+import json
+import re
+from pathlib import Path
+
+out = Path('day1_lab_outputs')
+cls = json.loads((out / 'classification_predictions.json').read_text(encoding='utf-8'))
+det = json.loads((out / 'detection_predictions.json').read_text(encoding='utf-8'))
+seg = json.loads((out / 'segmentation_predictions.json').read_text(encoding='utf-8'))
+nb = json.loads(Path('day1_understand_labels_executed.ipynb').read_text(encoding='utf-8'))
+
+stdout = ''
+for cell in nb.get('cells', []):
+    for output in cell.get('outputs', []):
+        text = output.get('text')
+        if isinstance(text, list):
+            stdout += ''.join(text)
+        elif isinstance(text, str):
+            stdout += text
+
+c = next(r for r in cls if r['sample_id'] == 'traffic' and r['rank'] == 1)
+d = next(r for r in det if r['sample_id'] == 'kitchen')
+s = next(r for r in seg if r['sample_id'] == 'kitchen')
+
+threshold_counts = {}
+for threshold, count in re.findall(r'threshold=(0\.20|0\.35|0\.60):\s*(\d+) vật thể', stdout):
+    threshold_counts[threshold] = int(count)
+if threshold_counts != {'0.20': 17, '0.35': 11, '0.60': 6}:
+    raise AssertionError(f'Unexpected threshold counts: {threshold_counts}')
+
+polygon_preview = s['polygon_xy'][:8]
+bbox = d['bbox_xyxy']
+location_text = (
+    f"Hộp bắt đầu ở ({bbox[0]}, {bbox[1]}) và kết thúc ở ({bbox[2]}, {bbox[3]}) pixel, "
+    f"rộng {d['bbox_width']} px và cao {d['bbox_height']} px; vì gốc tọa độ ở góc trên-trái, "
+    "các số này mô tả vùng chữ nhật bao quanh object trong ảnh."
+)
+
+report = f'''# Báo cáo bài thực hành Ngày 1 – Đọc nhãn từ đầu ra YOLO11
+
+**Ngày chạy:** 2026-09-11
+
+**Runtime Colab:** GPU
+
+**Python / PyTorch / Ultralytics:** Python 3.13.15 / PyTorch 2.11.0+cu128 / Ultralytics 8.4.145
+
+**Checkpoint:** `yolo11n-cls.pt`, `yolo11n.pt`, `yolo11n-seg.pt`
+
+**Thay đổi so với notebook nguồn:** Không thay đổi checkpoint, threshold hay logic notebook nguồn.
+
+> ZIP do notebook tạo có tên `<KHOA>-DAY01-report.zip` (ví dụ: `K4-DAY01-report.zip`). Giải nén rồi đặt trực tiếp `REPORT.md` và
+> `day1_lab_outputs/` vào thư mục `report/` của repository tạo từ template. Không ghi họ tên, MSSV,
+> email, số điện thoại hoặc dữ liệu cá nhân khác. Nộp link repository trên VLearn; tài khoản VLearn xác
+> định người nộp.
+
+## 1. Phân loại ảnh – prediction cấp ảnh
+
+Nguồn evidence: `classification_predictions.json`, sample `traffic`.
+
+- Record hạng 1 (`class_id`, `class_name`, `rank`, `score`, `taxonomy_name`): `class_id={c['class_id']}`, `class_name={c['class_name']}`, `rank={c['rank']}`, `score={c['score']}`, `taxonomy_name={c['taxonomy_name']}`.
+- Record này mô tả toàn ảnh như thế nào? Record là dự đoán cấp ảnh: YOLO11n-cls xếp toàn bộ ảnh `traffic` gần với lớp `{c['class_name']}` nhất, chứ record này không chỉ một object riêng bằng box.
+- Ai định nghĩa class list mà checkpoint có thể dự đoán? Class list được xác định bởi taxonomy của bộ dữ liệu/checkpoint đã dùng để huấn luyện; ở đây là `ImageNet-1K`, không phải model tự tạo thêm lớp khi suy luận.
+- Vì sao cần giữ cả ID, tên lớp và tên taxonomy? `class_id` là mã máy đọc ổn định trong đúng taxonomy, `class_name` giúp con người hiểu ý nghĩa, còn `taxonomy_name` cho biết ID/tên đó thuộc hệ phân loại nào. Thiếu taxonomy có thể làm cùng một ID bị hiểu sai giữa các bộ dữ liệu.
+- Nếu ảnh có nhiều chủ thể, guideline cần quy định điều gì? Guideline cần nói rõ quy tắc chọn nhãn cấp ảnh: chọn chủ thể chính, cho phép multi-label hay xử lý ảnh mơ hồ như thế nào. Không nên chỉ lấy lớp có score cao nhất rồi coi đó là ground truth.
+- Vì sao model score không phải ground truth? `score={c['score']}` chỉ thể hiện mức tự tin của model với prediction theo checkpoint hiện tại. Ground truth phải do con người gán theo guideline và được QC, nên score không phải điểm chất lượng nhãn và không thể chép thẳng thành nhãn chuẩn.
+
+## 2. Phát hiện vật thể – lớp và box cho từng object
+
+Nguồn evidence: `detection_predictions.json` và `visuals/detection_predictions.png`, sample `kitchen`.
+
+- Một record (`class_name`, `score`, `bbox_xyxy`, `bbox_width`, `bbox_height`): `class_name={d['class_name']}`, `score={d['score']}`, `bbox_xyxy={d['bbox_xyxy']}`, `bbox_width={d['bbox_width']}`, `bbox_height={d['bbox_height']}`.
+- Diễn giải vị trí box bằng lời: {location_text}
+- So sánh số prediction ở hai threshold: threshold `0.20` giữ **17** prediction, `0.35` giữ **11**, còn `0.60` giữ **6** prediction trên sample `kitchen`.
+- Điều gì thay đổi đối với độ bao phủ và khối lượng reviewer cần xem? Hạ threshold từ 0.60 xuống 0.20 tăng độ bao phủ prediction và giữ thêm các object confidence thấp, nhưng reviewer phải xem nhiều trường hợp hơn và có thể gặp nhiều false positive hơn. Tăng threshold giảm khối lượng review nhưng có nguy cơ bỏ sót object thật.
+- Đề xuất một quy tắc box chặt: box phải bao hết phần object cần gán nhãn nhưng bám sát mép ngoài của object, tránh cắt mất phần nhìn thấy và tránh chứa quá nhiều nền không cần thiết.
+- Với object bị che khuất/cắt mép, điều gì cần guideline hoặc escalation quyết định? Cần quy định rõ có gán nhãn object chỉ nhìn thấy một phần hay không, box chỉ bao phần nhìn thấy hay ước lượng toàn vật thể, và mức che khuất/cắt mép nào phải chuyển cho reviewer/mentor quyết định.
+
+## 3. Phân đoạn theo từng đối tượng – polygon cho mỗi instance
+
+Nguồn evidence: `segmentation_predictions.json` và `visuals/segmentation_prediction.png`, sample `kitchen`.
+
+- Một record (`instance_id`, `class_name`, `score`, số điểm và một phần `polygon_xy`): `instance_id={s['instance_id']}`, `class_name={s['class_name']}`, `score={s['score']}`, `polygon_point_count={s['polygon_point_count']}`, phần đầu `polygon_xy={polygon_preview}`.
+- Polygon bổ sung chi tiết gì so với box? Box chỉ cho một hình chữ nhật bao object, còn `polygon_xy` dùng nhiều điểm để bám theo biên thật của instance, nên mô tả hình dạng chi tiết hơn và loại được nhiều vùng nền nằm trong box nhưng không thuộc object.
+- `instance_id` dùng để làm gì và không phải loại ID nào? `{s['instance_id']}` định danh riêng một instance trong output lab, giúp phân biệt nhiều object cùng class. Nó không phải `class_id` và cũng không phải tracking ID xuyên video.
+- Đề xuất một quy tắc biên mask: polygon/mask phải bám sát phần biên nhìn thấy của object, không ăn sang object kế bên hoặc nền; các chi tiết biên nhìn thấy rõ cần được giữ nhất quán giữa các annotator.
+- Với vùng mờ/tiếp xúc/che khuất, điều gì cần guideline hoặc escalation quyết định? Guideline cần quy định pixel biên mơ hồ thuộc foreground hay background, cách tách hai object chạm nhau và cách xử lý phần bị che. Nếu không thể xác định nhất quán từ ảnh, annotator nên đánh dấu/escalate thay vì tự suy đoán hình dạng bị che.
+
+## 4. Vòng đời và kiểm tra chất lượng
+
+`ảnh thô → guideline → ground truth → huấn luyện → prediction → QC/rework`
+
+| Tác vụ | Đơn vị/định dạng ground truth | Lỗi hoặc điểm mơ hồ quan sát được | Annotator làm gì? | Reviewer xem gì? |
+| --- | --- | --- | --- | --- |
+| Phân loại ảnh | Một class cho toàn ảnh theo taxonomy/guideline của dự án | Ảnh `traffic` có nhiều chủ thể nhưng model xếp `{c['class_name']}` hạng 1 với score {c['score']} | Áp dụng quy tắc chọn chủ thể/nhãn cấp ảnh, không sao chép prediction | Kiểm tra class có đúng taxonomy và đúng quy tắc ảnh nhiều chủ thể hay không |
+| Phát hiện vật thể | Một class + `bbox_xyxy` cho mỗi object | Số prediction đổi từ 17 ở threshold 0.20 xuống 6 ở 0.60, nên object confidence thấp có thể bị bỏ | Gán đủ object thuộc scope và vẽ box chặt theo guideline, kể cả khi model bỏ sót | Kiểm tra thiếu/thừa object, class, độ chặt box, object che khuất/cắt mép |
+| Instance segmentation | Một class + polygon/mask riêng cho mỗi instance | Biên object, vùng tiếp xúc và phần che khuất có thể mơ hồ | Tạo polygon bám biên nhìn thấy và tách riêng từng instance | Kiểm tra `instance_id`, class, biên mask, vùng ăn nền/chồng sang object khác và tính nhất quán |
+
+Prediction chỉ là kết quả mô hình sau huấn luyện để tham khảo/QC. Ground truth được tạo từ ảnh thô theo guideline; nếu QC phát hiện lỗi hoặc trường hợp mơ hồ thì cần rework hoặc escalation trước khi dùng dữ liệu tiếp.
+
+## 5. An toàn dữ liệu
+
+- Một quy tắc bảo vệ dữ liệu: chỉ sử dụng các ảnh COCO công khai được notebook cung cấp; không đưa ảnh cá nhân, khách hàng, khuôn mặt, biển số hoặc dữ liệu nội bộ/nhạy cảm vào notebook hay repository public.
+- Nếu thấy ảnh hoặc dữ liệu không đúng phạm vi, tôi sẽ dừng và báo cho: Lab Coach / mentor phụ trách bài lab để được xác nhận trước khi tiếp tục.
+
+## 6. Danh sách bằng chứng
+
+- [x] `classification_predictions.json`
+- [x] `detection_predictions.json`
+- [x] `segmentation_predictions.json`
+- [x] `IMAGE_ATTRIBUTION.md`
+- [x] `visuals/classification_top5.png`
+- [x] `visuals/detection_predictions.png`
+- [x] `visuals/segmentation_prediction.png`
+- [x] Ô validation cuối notebook báo `PASS`.
+- [x] Không có họ tên, MSSV hoặc dữ liệu nhạy cảm trong báo cáo/output.
+'''
+
+Path('REPORT.md').write_text(report, encoding='utf-8')
+print('REPORT.md filled from generated JSON evidence and notebook outputs.')
